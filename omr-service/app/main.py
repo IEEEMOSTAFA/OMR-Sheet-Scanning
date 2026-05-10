@@ -11,7 +11,11 @@ import uvicorn
 import os
 import tempfile
 
-from app.omr_processor import OMRProcessor
+# from app.omr_processor import OMRProcessor
+
+# ✅ হওয়া উচিত (যদি app/ ফোল্ডার থেকে রান করেন):
+from omr_processor import OMRProcessor
+from config import OMRConfig
 
 # Create FastAPI app
 app = FastAPI(
@@ -257,111 +261,3 @@ if __name__ == "__main__":
         log_level="info"
     )
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# from fastapi import FastAPI, UploadFile, File, HTTPException
-# from fastapi.middleware.cors import CORSMiddleware
-# from fastapi.responses import JSONResponse, FileResponse
-# from app.omr_processor import OMRProcessor
-# import uvicorn
-# import os
-
-# app = FastAPI(title="OMR Processing Service - MCQ Checker")
-
-# app.add_middleware(
-#     CORSMiddleware,
-#     allow_origins=["*"],
-#     allow_credentials=True,
-#     allow_methods=["*"],
-#     allow_headers=["*"],
-# )
-
-# processor = OMRProcessor()
-
-# @app.get("/")
-# async def root():
-#     return {
-#         "service": "OMR MCQ Checker",
-#         "status": "running",
-#         "endpoints": {
-#             "health": "/health",
-#             "process": "POST /process",
-#             "process_batch": "POST /process-batch",
-#             "calibrate": "POST /calibrate"
-#         }
-#     }
-
-# @app.get("/health")
-# async def health_check():
-#     return {"status": "healthy", "service": "omr-mcq-service"}
-
-# @app.post("/process")
-# async def process_omr(file: UploadFile = File(...)):
-#     """Process an OMR sheet image"""
-    
-#     # Validate file type
-#     if not file.content_type in ["image/jpeg", "image/jpg", "image/png"]:
-#         return JSONResponse(
-#             status_code=400,
-#             content={"success": False, "error": "Only JPEG/PNG images allowed"}
-#         )
-    
-#     # Read and process
-#     image_bytes = await file.read()
-#     result = processor.process_image(image_bytes)
-    
-#     if result["success"]:
-#         return JSONResponse(content=result, status_code=200)
-#     else:
-#         return JSONResponse(content=result, status_code=400)
-
-# @app.post("/calibrate")
-# async def calibrate(file: UploadFile = File(...)):
-#     """Calibrate coordinates for a new OMR sheet design"""
-#     from app.calibrate import auto_calibrate
-#     import tempfile
-    
-#     # Save uploaded file temporarily
-#     with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp:
-#         tmp.write(await file.read())
-#         tmp_path = tmp.name
-    
-#     # Run calibration
-#     result = auto_calibrate(tmp_path)
-    
-#     # Cleanup
-#     os.unlink(tmp_path)
-    
-#     return JSONResponse(content=result)
-
-# if __name__ == "__main__":
-#     uvicorn.run(
-#         "app.main:app",
-#         host="0.0.0.0",
-#         port=8001,
-#         reload=True
-#     )

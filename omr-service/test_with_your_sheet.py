@@ -104,9 +104,8 @@ def generate_sample_report(exam_key: dict, results: dict):
     print(f"Grade: {grade}")
 
 if __name__ == "__main__":
-    # Test with your OMR sheet
-    image_file = "Perfec_filled.png"  # Your uploaded file name
-    
+ 
+    image_file = "./test_images/Perfect_image3.png"
     result = test_with_your_sheet(image_file)
     
     # If you have an answer key, generate report
