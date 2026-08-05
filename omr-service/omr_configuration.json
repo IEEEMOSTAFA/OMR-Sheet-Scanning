@@ -1,0 +1,99 @@
+{
+  "PREPROCESS": {
+    "blur_kernel": [
+      5,
+      5
+    ],
+    "threshold_block_size": 15,
+    "threshold_constant": 3,
+    "min_bubble_area": 150,
+    "max_bubble_area": 1200,
+    "aspect_ratio_min": 0.6,
+    "aspect_ratio_max": 1.4
+  },
+  "STUDENT_ID": {
+    "x": 699,
+    "y": 215,
+    "width": 597,
+    "height": 76,
+    "num_digits": 10,
+    "digit_width": 59,
+    "digit_height": 76,
+    "row_spacing": 76,
+    "options": 1,
+    "col_x": [
+      710,
+      759,
+      809,
+      858,
+      908,
+      1008,
+      1058,
+      1151,
+      1226,
+      1282
+    ]
+  },
+  "THRESHOLDS": {
+    "min_black_pixels": 35,
+    "fill_threshold_pct": 0.13,
+    "max_black_pixels": 700,
+    "fill_ratio": 0.38,
+    "confidence_threshold": 0.65,
+    "darkness_threshold": 100,
+    "sample_radius": 8
+  },
+  "LEFT_COLUMN": {
+    "option_x": [
+      40,
+      107,
+      174,
+      240
+    ],
+    "row_y": [
+      356,
+      392,
+      420,
+      484,
+      547,
+      613,
+      690,
+      745,
+      800,
+      855
+    ],
+    "bubble_width": 15,
+    "bubble_height": 25
+  },
+  "RIGHT_COLUMN": {
+    "option_x": [
+      709,
+      756,
+      809,
+      857
+    ],
+    "row_y": [
+      356,
+      392,
+      420,
+      484,
+      547,
+      613,
+      690,
+      745,
+      800,
+      855
+    ],
+    "bubble_width": 15,
+    "bubble_height": 25
+  },
+  "ANSWERS": {
+    "total_questions": 20,
+    "options_per_q": 4
+  },
+  "GRADING": {
+    "marks_per_question": 1,
+    "negative_marking": false,
+    "negative_marks": 0.25
+  }
+}

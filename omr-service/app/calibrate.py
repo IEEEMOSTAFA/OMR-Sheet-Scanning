@@ -16,6 +16,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Optional
 
 
 class OMRCalibrator:
@@ -144,8 +145,14 @@ class OMRCalibrator:
     def detect_bubbles(self) -> list:
         """সব bubble contour খুঁজে বের করে"""
         processed = self.preprocess()
+        # NOTE: RETR_EXTERNAL only returns the OUTERMOST contour. If the sheet's
+        # border and grid/table lines are all connected (very common), the whole
+        # page collapses into ONE giant external contour and every bubble inside
+        # it is skipped -> "Bubbles found: 0". RETR_LIST returns every contour
+        # (inner + outer) so individual bubbles are found regardless of the
+        # surrounding grid lines.
         contours, _ = cv2.findContours(
-            processed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+            processed, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE
         )
 
         bubbles = []
@@ -158,13 +165,16 @@ class OMRCalibrator:
 
             x, y, w, h = cv2.boundingRect(cnt)
             ar = w / h if h > 0 else 0
-            if not (0.6 < ar < 1.4):
+            # Widened from 0.6-1.4: the fixed TARGET_W x TARGET_H resize can
+            # stretch bubbles into mild ellipses when the source image's
+            # aspect ratio differs from the target's.
+            if not (0.4 < ar < 1.8):
                 continue
 
             # Circularity check
             peri = cv2.arcLength(cnt, True)
             circ = 4 * np.pi * area / (peri * peri) if peri > 0 else 0
-            if circ < 0.5:
+            if circ < 0.4:
                 continue
 
             bubbles.append({
@@ -583,12 +593,6 @@ if __name__ == "__main__":
         print("💾 Saved: calibrated_output.jpg")
 
 
-# ─────────────────────────────────────────────────────────
-# Optional type import fix
-# ─────────────────────────────────────────────────────────
-from typing import Optional
-
-
 def auto_calibrate(image_path: str) -> Optional[dict]:
     """Quick one-call calibration"""
     try:
@@ -612,10 +616,11 @@ def main():
     else:
         # Default image খোঁজো
         defaults = [
+            "test_images/omr_or_1.jpeg",
             "test_images/Perfect_image3.png",
             "../test_images/Perfect_image3.png",
-            "test_images/sample_omr.jpg",
-            "Perfect_image3.png",
+            "test_images/sample_omr.jpg"
+            
         ]
         image_path = None
         for p in defaults:
@@ -636,6 +641,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
