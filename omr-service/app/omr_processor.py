@@ -1,404 +1,17 @@
-# """
-# OMR Processor — Handwritten MCQ Answer Sheet
-# ==============================================
-# ✅ Grayscale darkness detection (works on clear phone-camera photos)
-# ✅ Auto-scaling for different resolutions of the SAME sheet design
-# ✅ CLAHE enhancement for uneven lighting
-# ✅ Student ID extraction
-# ✅ Left column Q1-Q10 | Right column Q11-Q20
-
-# Detection:
-#   filled bubble  → grayscale mean ≈ 30–70
-#   unfilled       → grayscale mean ≈ 130–200
-#   darkest bubble = selected answer
-#   diff < threshold → blank
-# """
-
-# import cv2
-# import numpy as np
-# from typing import Dict, List, Optional, Tuple
-
-# try:
-#     from app.config import OMRConfig
-#     from app.utils import OMRUtils
-# except ImportError:
-#     from config import OMRConfig
-#     try:
-#         from utils import OMRUtils
-#     except ImportError:
-#         OMRUtils = None
-
-
-# class OMRProcessor:
-
-#     def __init__(self):
-#         self.config = OMRConfig
-#         self.utils  = OMRUtils
-
-#         print("=" * 60)
-#         print("   OMR Processor v2.1 — Phone Camera Support")
-#         print(f"   Total Questions : {self.config.ANSWERS['total_questions']}")
-#         print(f"   Left  X (A-D)  : {self.config.LEFT_COLUMN['option_x']}")
-#         print(f"   Right X (A-D)  : {self.config.RIGHT_COLUMN['option_x']}")
-#         print(f"   Base resolution: {self.config.BASE_WIDTH}×{self.config.BASE_HEIGHT}")
-#         print(f"   Method         : {self.config.THRESHOLDS['detection_method']}")
-#         print("=" * 60)
-
-#     # ─────────────────────────────────────────────────────────────
-#     # MAIN ENTRY
-#     # ─────────────────────────────────────────────────────────────
-#     def process_image(
-#         self,
-#         image_bytes: bytes,
-#         apply_perspective: bool = False,
-#         debug: bool = False
-#     ) -> Dict:
-#         try:
-#             nparr = np.frombuffer(image_bytes, np.uint8)
-#             image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-#             if image is None:
-#                 return {"success": False, "error": "Image decode failed"}
-
-#             orig_h, orig_w = image.shape[:2]
-#             print(f"\n{'='*60}")
-#             print(f"📥 Image: {orig_w}×{orig_h} px")
-
-#             is_cam = self._is_camera_image(image)
-#             if is_cam:
-#                 print("   📷 Camera image → CLAHE enhance...")
-#                 image = self._enhance_camera_image(image)
-
-#             if apply_perspective and self.utils is not None:
-#                 try:
-#                     print("   🔄 Perspective correction...")
-#                     image = self.utils.correct_perspective(image)
-#                 except Exception as e:
-#                     print(f"   ⚠️ Perspective skipped: {e}")
-
-#             curr_h, curr_w = image.shape[:2]
-#             sx = curr_w / float(self.config.BASE_WIDTH)
-#             sy = curr_h / float(self.config.BASE_HEIGHT)
-#             print(f"   📐 Scale: sx={sx:.3f}, sy={sy:.3f}")
-
-#             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-#             blur_k = self.config.PREPROCESS.get("blur_kernel", (5, 5))
-#             gray_blur = cv2.GaussianBlur(gray, blur_k, 0)
-
-#             if debug:
-#                 cv2.imwrite("debug_gray.png", gray_blur)
-
-#             student_id = self._extract_student_id(gray_blur, sx, sy, debug=debug)
-#             print(f"   🎓 Student ID: {student_id}")
-
-#             answers = self._extract_answers(gray_blur, sx, sy, debug=debug)
-
-#             answered = sum(1 for a in answers if a is not None)
-#             blank    = self.config.ANSWERS["total_questions"] - answered
-
-#             print(f"   📊 Answered: {answered}/{self.config.ANSWERS['total_questions']}")
-#             print(f"{'='*60}\n")
-
-#             return {
-#                 "success"         : True,
-#                 "student_id"      : student_id,
-#                 "answers"         : answers,
-#                 "total_answered"  : answered,
-#                 "total_blank"     : blank,
-#                 "total_questions" : self.config.ANSWERS["total_questions"],
-#                 "image_type"      : "camera" if is_cam else "scanned",
-#                 "confidence"      : round(answered / self.config.ANSWERS["total_questions"], 2),
-#             }
-
-#         except Exception as e:
-#             import traceback
-#             traceback.print_exc()
-#             return {"success": False, "error": str(e)}
-
-#     # ─────────────────────────────────────────────────────────────
-#     # BUBBLE READER — lower mean = darker = filled
-#     # ─────────────────────────────────────────────────────────────
-#     def _read_bubble_darkness(
-#         self,
-#         gray: np.ndarray,
-#         cx: int,
-#         cy: int,
-#         radius: int
-#     ) -> float:
-#         shrink = self.config.THRESHOLDS.get("sample_radius_shrink", 3)
-#         sample_r = max(radius - shrink, 4)
-
-#         h, w = gray.shape[:2]
-#         cx = int(np.clip(cx, 0, w - 1))
-#         cy = int(np.clip(cy, 0, h - 1))
-
-#         mask = np.zeros(gray.shape, dtype="uint8")
-#         cv2.circle(mask, (cx, cy), sample_r, 255, -1)
-#         return cv2.mean(gray, mask=mask)[0]
-
-#     def _select_answer_from_row(
-#         self,
-#         gray: np.ndarray,
-#         bubble_centers: List[Tuple[int, int]],
-#         radius: int,
-#         options: List[str]
-#     ) -> Optional[str]:
-#         threshold = self.config.THRESHOLDS.get("darkness_diff_threshold", 30)
-
-#         values = [
-#             self._read_bubble_darkness(gray, cx, cy, radius)
-#             for cx, cy in bubble_centers
-#         ]
-
-#         min_val = min(values)
-#         max_val = max(values)
-#         diff = max_val - min_val
-
-#         if diff < threshold:
-#             return None
-
-#         return options[values.index(min_val)]
-
-#     # ─────────────────────────────────────────────────────────────
-#     # ANSWERS Q1–Q20
-#     # ─────────────────────────────────────────────────────────────
-#     def _extract_answers(
-#         self,
-#         gray: np.ndarray,
-#         sx: float,
-#         sy: float,
-#         debug: bool = False
-#     ) -> List[Optional[str]]:
-#         options     = ['A', 'B', 'C', 'D']
-#         all_answers = [None] * self.config.ANSWERS["total_questions"]
-
-#         def _read_column(col_cfg: dict, q_offset: int, label: str):
-#             print(f"\n   📝 {label}:")
-#             scaled_x = [int(x * sx) for x in col_cfg["option_x"]]
-#             radius   = max(int(col_cfg.get("bubble_radius", 12) * min(sx, sy)), 6)
-
-#             for q_idx, base_y in enumerate(col_cfg["row_y"]):
-#                 q_num    = q_idx + q_offset
-#                 scaled_y = int(base_y * sy)
-#                 centers  = [(x, scaled_y) for x in scaled_x]
-
-#                 dark_vals = [
-#                     self._read_bubble_darkness(gray, cx, cy, radius)
-#                     for cx, cy in centers
-#                 ]
-#                 answer = self._select_answer_from_row(gray, centers, radius, options)
-#                 all_answers[q_num - 1] = answer
-#                 status = answer if answer else "---"
-#                 print(f"      Q{q_num:2d}: dark={[f'{v:.0f}' for v in dark_vals]} → {status}")
-
-#         _read_column(self.config.LEFT_COLUMN,  1,  "LEFT  COLUMN (Q1-Q10)")
-#         _read_column(self.config.RIGHT_COLUMN, 11, "RIGHT COLUMN (Q11-Q20)")
-
-#         if debug:
-#             self._draw_debug(gray, all_answers, sx, sy)
-#         return all_answers
-
-#     # ─────────────────────────────────────────────────────────────
-#     # STUDENT ID
-#     # ─────────────────────────────────────────────────────────────
-#     def _extract_student_id(
-#         self,
-#         gray: np.ndarray,
-#         sx: float,
-#         sy: float,
-#         debug: bool = False
-#     ) -> str:
-#         id_cfg = self.config.STUDENT_ID
-#         digits = []
-#         options_count = id_cfg.get("options", 10)
-
-#         print(f"\n   📖 Extracting Student ID...")
-
-#         for col in range(id_cfg["num_digits"]):
-#             col_x_list = id_cfg.get("col_x", None)
-#             if col_x_list and col < len(col_x_list):
-#                 col_x = int(col_x_list[col] * sx)
-#             else:
-#                 col_x = int((id_cfg["x"] + col * id_cfg["digit_width"]) * sx)
-
-#             darkness_vals = []
-#             row_spacing = int(id_cfg.get("row_spacing", id_cfg["digit_height"]) * sy)
-#             d_height    = max(int(id_cfg["digit_height"] * sy), 8)
-#             d_width     = max(int(id_cfg["digit_width"] * sx), 10)
-
-#             for row in range(options_count):
-#                 y_pos = int(id_cfg["y"] * sy) + row * row_spacing
-#                 y1 = max(0, y_pos)
-#                 y2 = min(gray.shape[0], y_pos + d_height)
-#                 x1 = max(0, col_x - d_width // 2)
-#                 x2 = min(gray.shape[1], col_x + d_width // 2)
-
-#                 roi = gray[y1:y2, x1:x2]
-#                 if roi.size < 10:
-#                     darkness_vals.append(255.0)
-#                 else:
-#                     darkness_vals.append(float(np.mean(roi)))
-
-#             min_val = min(darkness_vals)
-#             max_val = max(darkness_vals)
-#             diff    = max_val - min_val
-#             threshold = self.config.THRESHOLDS.get("darkness_diff_threshold", 30)
-
-#             if diff >= threshold:
-#                 selected = str(darkness_vals.index(min_val))
-#                 print(f"      Col {col+1}: ✅ {selected}  (dark={min_val:.0f}, diff={diff:.0f})")
-#             else:
-#                 selected = "?"
-#                 print(f"      Col {col+1}: ❌ blank  (diff={diff:.0f})")
-#             digits.append(selected)
-
-#         return "".join(digits)
-
-#     # ─────────────────────────────────────────────────────────────
-#     # GRADING
-#     # ─────────────────────────────────────────────────────────────
-#     def grade_exam(self, student_answers: List, answer_key: Dict) -> Dict:
-#         correct = wrong = blank = 0
-#         details = []
-#         grading = self.config.GRADING
-
-#         for i, student_ans in enumerate(student_answers):
-#             q_num = str(i + 1)
-#             correct_ans = answer_key.get(q_num)
-
-#             if student_ans is None:
-#                 blank += 1
-#                 details.append({
-#                     "question": i + 1, "student": None,
-#                     "correct": correct_ans, "status": "blank", "marks": 0
-#                 })
-#             elif student_ans == correct_ans:
-#                 correct += 1
-#                 details.append({
-#                     "question": i + 1, "student": student_ans,
-#                     "correct": correct_ans, "status": "correct",
-#                     "marks": grading["marks_per_question"]
-#                 })
-#             else:
-#                 wrong += 1
-#                 neg = grading["negative_marks"] if grading["negative_marking"] else 0
-#                 details.append({
-#                     "question": i + 1, "student": student_ans,
-#                     "correct": correct_ans, "status": "wrong", "marks": -neg
-#                 })
-
-#         total_q = len(answer_key)
-#         raw_marks = correct * grading["marks_per_question"]
-#         if grading["negative_marking"]:
-#             raw_marks -= wrong * grading["negative_marks"]
-#         raw_marks = max(raw_marks, 0)
-#         percentage = (raw_marks / total_q * 100) if total_q > 0 else 0
-
-#         if   percentage >= 80: grade = "A+"
-#         elif percentage >= 70: grade = "A"
-#         elif percentage >= 60: grade = "A-"
-#         elif percentage >= 50: grade = "B"
-#         elif percentage >= 40: grade = "C"
-#         elif percentage >= 33: grade = "D"
-#         else: grade = "F"
-
-#         print(f"\n   🏆 {correct}/{total_q} correct | {percentage:.1f}% | Grade: {grade}")
-#         return {
-#             "correct": correct, "wrong": wrong, "blank": blank, "total": total_q,
-#             "raw_marks": raw_marks, "percentage": round(percentage, 1),
-#             "grade": grade, "details": details,
-#         }
-
-#     # ─────────────────────────────────────────────────────────────
-#     # HELPERS
-#     # ─────────────────────────────────────────────────────────────
-#     def _is_camera_image(self, image: np.ndarray) -> bool:
-#         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-#         laplacian_var = cv2.Laplacian(gray, cv2.CV_64F).var()
-#         h, w = image.shape[:2]
-#         return (w > 2000 or h > 2000) or laplacian_var < 5000
-
-#     def _enhance_camera_image(self, image: np.ndarray) -> np.ndarray:
-#         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-#         l, a, b = cv2.split(lab)
-#         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-#         l_enhanced = clahe.apply(l)
-#         return cv2.cvtColor(cv2.merge([l_enhanced, a, b]), cv2.COLOR_LAB2BGR)
-
-#     def _draw_debug(
-#         self,
-#         gray: np.ndarray,
-#         answers: List[Optional[str]],
-#         sx: float,
-#         sy: float,
-#         output_path: str = "debug_answers.png"
-#     ):
-#         color_img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-#         options = ['A', 'B', 'C', 'D']
-
-#         def _draw_column(col_cfg, q_offset):
-#             scaled_x = [int(x * sx) for x in col_cfg["option_x"]]
-#             radius = max(int(col_cfg.get("bubble_radius", 12) * min(sx, sy)), 6)
-#             for q_idx, base_y in enumerate(col_cfg["row_y"]):
-#                 q_num = q_idx + q_offset
-#                 scaled_y = int(base_y * sy)
-#                 ans = answers[q_num - 1]
-#                 for i, cx in enumerate(scaled_x):
-#                     color = (0, 200, 0) if options[i] == ans else (0, 0, 200)
-#                     cv2.circle(color_img, (cx, scaled_y), radius, color, 2)
-#                 label_x = max(5, scaled_x[0] - 50)
-#                 cv2.putText(
-#                     color_img, f"Q{q_num}:{ans or '?'}",
-#                     (label_x, scaled_y + 5),
-#                     cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 100, 0), 1
-#                 )
-
-#         _draw_column(self.config.LEFT_COLUMN, 1)
-#         _draw_column(self.config.RIGHT_COLUMN, 11)
-#         cv2.imwrite(output_path, color_img)
-#         print(f"   💾 Debug saved: {output_path}")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 # ----------------------------------- test:   
 
 
 
 
+"""Perspective-normalized OMR processor for the supplied 20-question sheet."""
 
+from __future__ import annotations
 
-
-
-
-"""
-OMR Processor v3 — Resolution-robust bubble tracking
-=====================================================
-✅ Relative coordinates (fractions of W/H) — size change OK
-✅ Local search around expected center — small crop shift OK
-✅ CLAHE for phone lighting
-✅ Same printed sheet design → works across phone photos
-
-Detection:
-  expected bubble position → search nearby window → pick darkest mean
-  darkest option in row = answer (if gap > threshold)
-"""
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
-from typing import Dict, List, Optional, Tuple
 
 try:
     from app.config import OMRConfig
@@ -407,45 +20,64 @@ except ImportError:
 
 
 class OMRProcessor:
-
-    def __init__(self):
+    def __init__(self) -> None:
         self.config = OMRConfig
         print("=" * 60)
-        print("   OMR Processor v3 — Relative + Local Search")
+        print("   OMR Processor v5 — Border Warp + Student-ID Auto Align")
         print(f"   Questions : {self.config.ANSWERS['total_questions']}")
-        print(f"   Method    : relative coords + local dark search")
+        print("   Method    : perspective normalization + inner bubble score")
         print("=" * 60)
 
-    # ─────────────────────────────────────────────────────────
-    # PUBLIC
-    # ─────────────────────────────────────────────────────────
-    def process_image(self, image_bytes: bytes, debug: bool = False) -> Dict:
+    def process_image(
+        self,
+        image_bytes: bytes,
+        apply_perspective: bool = True,
+        debug: bool = False,
+    ) -> Dict:
+        """Read the student ID and answers from one image.
+
+        ``apply_perspective`` is retained for compatibility with the existing
+        FastAPI endpoint. Border normalization is attempted automatically,
+        because raw whole-image fractions are not reliable for phone photos.
+        """
         try:
-            nparr = np.frombuffer(image_bytes, np.uint8)
-            image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+            data = np.frombuffer(image_bytes, np.uint8)
+            image = cv2.imdecode(data, cv2.IMREAD_COLOR)
             if image is None:
                 return {"success": False, "error": "Cannot decode image"}
 
             h0, w0 = image.shape[:2]
             print(f"\n📥 Image: {w0}×{h0} px")
 
-            # Enhance phone photos
-            image = self._enhance(image)
-            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-            gray = cv2.GaussianBlur(gray, (5, 5), 0)
+            # Always try automatic normalization. If no suitable quadrilateral
+            # is found, the original image is resized as a safe fallback.
+            normalized, warped = self._normalize_sheet(image)
+            print(
+                f"   Sheet normalization: {'perspective warp' if warped else 'resize fallback'}"
+            )
 
-            h, w = gray.shape[:2]
-            print(f"   Working size: {w}×{h}")
+            enhanced = self._enhance(normalized)
+            gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+            blur_kernel = self.config.PREPROCESS.get("blur_kernel", (5, 5))
+            gray = cv2.GaussianBlur(gray, blur_kernel, 0)
 
             if debug:
+                cv2.imwrite("debug_normalized.png", normalized)
                 cv2.imwrite("debug_gray.png", gray)
 
-            student_id = self._extract_student_id(gray)
+            student_id, sid_confidence, sid_alignment = self._extract_student_id(gray)
+            answers, answer_confidences = self._extract_answers(gray)
+            answered = sum(answer is not None for answer in answers)
+
+            if debug:
+                self._draw_debug(gray, answers, student_id, sid_alignment)
+
+            answer_conf = (
+                float(np.mean(answer_confidences)) if answer_confidences else 0.0
+            )
+            overall_conf = round((sid_confidence + answer_conf) / 2.0, 3)
+
             print(f"   🎓 Student ID: {student_id}")
-
-            answers = self._extract_answers(gray, debug=debug)
-            answered = sum(1 for a in answers if a is not None)
-
             print(f"   📊 Answered: {answered}/{self.config.ANSWERS['total_questions']}\n")
 
             return {
@@ -455,172 +87,389 @@ class OMRProcessor:
                 "total_answered": answered,
                 "total_blank": self.config.ANSWERS["total_questions"] - answered,
                 "total_questions": self.config.ANSWERS["total_questions"],
-                "image_type": "camera",
-                "confidence": round(answered / self.config.ANSWERS["total_questions"], 2),
+                "image_type": "camera_or_scan",
+                "confidence": overall_conf,
+                "student_id_confidence": round(sid_confidence, 3),
+                "student_id_valid": "?" not in student_id,
+                "student_id_alignment_px": {
+                    "dx": int(sid_alignment[0]),
+                    "dy": int(sid_alignment[1]),
+                },
+                "answer_confidences": [round(v, 3) for v in answer_confidences],
+                "perspective_normalized": warped,
             }
-        except Exception as e:
+        except Exception as exc:  # pragma: no cover - defensive API boundary
             import traceback
-            traceback.print_exc()
-            return {"success": False, "error": str(e)}
 
+            traceback.print_exc()
+            return {"success": False, "error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # Perspective normalization
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _order_points(points: np.ndarray) -> np.ndarray:
+        pts = points.reshape(4, 2).astype(np.float32)
+        ordered = np.zeros((4, 2), dtype=np.float32)
+        sums = pts.sum(axis=1)
+        diffs = np.diff(pts, axis=1).reshape(-1)
+        ordered[0] = pts[np.argmin(sums)]   # top-left
+        ordered[2] = pts[np.argmax(sums)]   # bottom-right
+        ordered[1] = pts[np.argmin(diffs)]  # top-right
+        ordered[3] = pts[np.argmax(diffs)]  # bottom-left
+        return ordered
+
+    def _find_sheet_quad(self, image: np.ndarray) -> Optional[np.ndarray]:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        threshold_value = self.config.THRESHOLDS.get("warp_threshold", 120)
+        _, binary = cv2.threshold(
+            gray, threshold_value, 255, cv2.THRESH_BINARY_INV
+        )
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 5))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        image_area = image.shape[0] * image.shape[1]
+        min_ratio = self.config.THRESHOLDS.get("warp_min_area_ratio", 0.25)
+
+        for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+            if cv2.contourArea(contour) < image_area * min_ratio:
+                break
+            perimeter = cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+            if len(approx) == 4:
+                return self._order_points(approx)
+        return None
+
+    def _normalize_sheet(self, image: np.ndarray) -> Tuple[np.ndarray, bool]:
+        width = self.config.BASE_WIDTH
+        height = self.config.BASE_HEIGHT
+        quad = self._find_sheet_quad(image)
+        if quad is None:
+            return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA), False
+
+        destination = np.array(
+            [[0, 0], [width - 1, 0], [width - 1, height - 1], [0, height - 1]],
+            dtype=np.float32,
+        )
+        matrix = cv2.getPerspectiveTransform(quad, destination)
+        warped = cv2.warpPerspective(image, matrix, (width, height))
+        return warped, True
+
+    # ------------------------------------------------------------------
+    # Bubble measurements
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _px(frac: float, total: int) -> int:
+        return int(round(frac * total))
+
+    def _bubble_stats(
+        self, gray: np.ndarray, cx: int, cy: int, radius: int
+    ) -> Tuple[float, float]:
+        h, w = gray.shape[:2]
+        cx = int(np.clip(cx, radius, w - radius - 1))
+        cy = int(np.clip(cy, radius, h - radius - 1))
+
+        mask = np.zeros(gray.shape, dtype=np.uint8)
+        cv2.circle(mask, (cx, cy), max(radius, 3), 255, -1)
+        pixels = gray[mask == 255]
+        if pixels.size == 0:
+            return 255.0, 0.0
+
+        dark_threshold = self.config.THRESHOLDS["dark_pixel_threshold"]
+        mean = float(np.mean(pixels))
+        dark_ratio = float(np.mean(pixels < dark_threshold))
+        return mean, dark_ratio
+
+    def _choose_mark(
+        self,
+        stats: Sequence[Tuple[float, float]],
+        diff_threshold: float,
+    ) -> Tuple[Optional[int], float]:
+        means = [item[0] for item in stats]
+        ratios = [item[1] for item in stats]
+        order = np.argsort(means)
+        best = int(order[0])
+        second = int(order[1])
+        gap = means[second] - means[best]
+
+        mean_limit = self.config.THRESHOLDS["filled_mean_threshold"]
+        ratio_limit = self.config.THRESHOLDS["filled_ratio_threshold"]
+        absolutely_filled = means[best] <= mean_limit or ratios[best] >= ratio_limit
+        clearly_best = gap >= diff_threshold
+
+        # Confidence combines absolute fill and separation from other bubbles.
+        fill_strength = max(
+            0.0,
+            min(
+                1.0,
+                max((mean_limit - means[best]) / max(mean_limit, 1), ratios[best] - 0.35),
+            ),
+        )
+        separation = max(0.0, min(1.0, gap / 80.0))
+        confidence = max(0.0, min(1.0, 0.55 * fill_strength + 0.45 * separation))
+
+        if not (absolutely_filled and clearly_best):
+            return None, confidence
+        return best, confidence
+
+    # ------------------------------------------------------------------
+    # Answers
+    # ------------------------------------------------------------------
+    def _extract_answers(
+        self, gray: np.ndarray
+    ) -> Tuple[List[Optional[str]], List[float]]:
+        h, w = gray.shape[:2]
+        options = ["A", "B", "C", "D"]
+        answers: List[Optional[str]] = [None] * self.config.ANSWERS["total_questions"]
+        confidences: List[float] = [0.0] * self.config.ANSWERS["total_questions"]
+        radius = max(
+            4,
+            int(round(self.config.THRESHOLDS["sample_radius_frac"] * min(h, w))),
+        )
+        diff_threshold = self.config.THRESHOLDS["darkness_diff_threshold"]
+
+        def read_column(column: Dict, q_offset: int, label: str) -> None:
+            print(f"\n   📝 {label}")
+            xs = [self._px(frac, w) for frac in column["option_x_frac"]]
+            for row_index, y_frac in enumerate(column["row_y_frac"]):
+                y = self._px(y_frac, h)
+                stats = [self._bubble_stats(gray, x, y, radius) for x in xs]
+                selected, confidence = self._choose_mark(stats, diff_threshold)
+                question_index = q_offset + row_index - 1
+                answer = options[selected] if selected is not None else None
+                answers[question_index] = answer
+                confidences[question_index] = confidence
+                means = [f"{mean:.0f}" for mean, _ in stats]
+                print(
+                    f"      Q{q_offset + row_index:2d}: mean={means} "
+                    f"→ {answer or 'BLANK'}"
+                )
+
+        read_column(self.config.LEFT_COLUMN, 1, "LEFT (Q1-Q10)")
+        read_column(self.config.RIGHT_COLUMN, 11, "RIGHT (Q11-Q20)")
+        return answers, confidences
+
+    # ------------------------------------------------------------------
+    # Student ID
+    # ------------------------------------------------------------------
+    def _align_student_id_grid(
+        self, gray: np.ndarray, xs: Sequence[int], ys: Sequence[int]
+    ) -> Tuple[int, int, float]:
+        """Find the small global shift of the printed Student-ID grid.
+
+        The outer sheet border is stable, but the ID grid itself moves roughly
+        10–15 px between the supplied scans.  We correlate an annulus-shaped
+        kernel with all 80 printed bubble outlines, then choose the offset that
+        gives the strongest average ring response.  This aligns the grid from
+        the printed circles, not from handwritten digits or filled interiors.
+        """
+        h, w = gray.shape[:2]
+        min_side = min(h, w)
+        thresholds = self.config.THRESHOLDS
+
+        inner = max(4, int(round(
+            thresholds["sid_align_annulus_inner_frac"] * min_side
+        )))
+        outer = max(inner + 3, int(round(
+            thresholds["sid_align_annulus_outer_frac"] * min_side
+        )))
+
+        yy, xx = np.mgrid[-outer:outer + 1, -outer:outer + 1]
+        annulus = (
+            (xx * xx + yy * yy <= outer * outer)
+            & (xx * xx + yy * yy >= inner * inner)
+        ).astype(np.float32)
+        annulus /= max(float(annulus.sum()), 1.0)
+
+        darkness = (255.0 - gray.astype(np.float32))
+        response = cv2.filter2D(
+            darkness, cv2.CV_32F, annulus, borderType=cv2.BORDER_REPLICATE
+        )
+
+        search_x = max(4, int(round(
+            thresholds["sid_align_search_x_frac"] * w
+        )))
+        search_y = max(3, int(round(
+            thresholds["sid_align_search_y_frac"] * h
+        )))
+
+        base_x = np.asarray(xs, dtype=np.int32)
+        base_y = np.asarray(ys, dtype=np.int32)
+        best_score = -1.0
+        best_dx = best_dy = 0
+
+        for dy in range(-search_y, search_y + 1):
+            shifted_y = base_y + dy
+            if shifted_y.min() < 0 or shifted_y.max() >= h:
+                continue
+            for dx in range(-search_x, search_x + 1):
+                shifted_x = base_x + dx
+                if shifted_x.min() < 0 or shifted_x.max() >= w:
+                    continue
+                score = float(response[np.ix_(shifted_y, shifted_x)].mean())
+                if score > best_score:
+                    best_score = score
+                    best_dx = dx
+                    best_dy = dy
+
+        return best_dx, best_dy, best_score
+
+    def _extract_student_id(
+        self, gray: np.ndarray
+    ) -> Tuple[str, float, Tuple[int, int]]:
+        h, w = gray.shape[:2]
+        cfg = self.config.STUDENT_ID
+        base_xs = [self._px(frac, w) for frac in cfg["col_x_frac"]]
+        base_ys = [self._px(frac, h) for frac in cfg["row_y_frac"]]
+        dx, dy, align_score = self._align_student_id_grid(gray, base_xs, base_ys)
+        xs = [x + dx for x in base_xs]
+        ys = [y + dy for y in base_ys]
+
+        radius = max(
+            4,
+            int(round(self.config.THRESHOLDS["sid_sample_radius_frac"] * min(h, w))),
+        )
+        diff_threshold = self.config.THRESHOLDS["sid_darkness_diff_threshold"]
+
+        digits: List[str] = []
+        confidences: List[float] = []
+        print("\n   📖 Student ID (bubbles):")
+        print(f"      Grid alignment: dx={dx:+d}px, dy={dy:+d}px, score={align_score:.1f}")
+        for column_index, x in enumerate(xs):
+            stats = [self._bubble_stats(gray, x, y, radius) for y in ys]
+            selected, confidence = self._choose_mark(stats, diff_threshold)
+            confidences.append(confidence)
+            if selected is None:
+                digit = "?"
+                print(f"      Col {column_index + 1}: ❌ ambiguous/blank")
+            else:
+                digit = str(selected)
+                best_mean, best_ratio = stats[selected]
+                means = sorted(item[0] for item in stats)
+                gap = means[1] - means[0]
+                print(
+                    f"      Col {column_index + 1}: ✅ {digit} "
+                    f"(mean={best_mean:.0f}, fill={best_ratio:.2f}, gap={gap:.0f})"
+                )
+            digits.append(digit)
+
+        mean_confidence = float(np.mean(confidences)) if confidences else 0.0
+        return "".join(digits), mean_confidence, (dx, dy)
+
+    # ------------------------------------------------------------------
+    # Grading
+    # ------------------------------------------------------------------
     def grade_exam(self, student_answers: List, answer_key: Dict) -> Dict:
         correct = wrong = blank = 0
         details = []
         marks = self.config.GRADING["marks_per_question"]
-        neg = self.config.GRADING["negative_marks"] if self.config.GRADING["negative_marking"] else 0
+        negative = (
+            self.config.GRADING["negative_marks"]
+            if self.config.GRADING["negative_marking"]
+            else 0
+        )
 
-        for i, ans in enumerate(student_answers):
-            q = str(i + 1)
-            key = answer_key.get(q)
-            if ans is None:
+        for index, answer in enumerate(student_answers):
+            question = str(index + 1)
+            key = answer_key.get(question)
+            if answer is None:
                 blank += 1
-                details.append({"question": i+1, "student": None, "correct": key, "status": "blank", "marks": 0})
-            elif ans == key:
+                status = "blank"
+                awarded = 0
+            elif answer == key:
                 correct += 1
-                details.append({"question": i+1, "student": ans, "correct": key, "status": "correct", "marks": marks})
+                status = "correct"
+                awarded = marks
             else:
                 wrong += 1
-                details.append({"question": i+1, "student": ans, "correct": key, "status": "wrong", "marks": -neg})
+                status = "wrong"
+                awarded = -negative
+            details.append(
+                {
+                    "question": index + 1,
+                    "student": answer,
+                    "correct": key,
+                    "status": status,
+                    "marks": awarded,
+                }
+            )
 
         total = len(answer_key)
-        raw = max(correct * marks - wrong * neg, 0)
-        pct = (raw / total * 100) if total else 0
-        grade = ("A+" if pct >= 80 else "A" if pct >= 70 else "A-" if pct >= 60
-                 else "B" if pct >= 50 else "C" if pct >= 40 else "D" if pct >= 33 else "F")
-
+        raw = max(correct * marks - wrong * negative, 0)
+        percentage = (raw / total * 100) if total else 0
+        grade = (
+            "A+" if percentage >= 80 else
+            "A" if percentage >= 70 else
+            "A-" if percentage >= 60 else
+            "B" if percentage >= 50 else
+            "C" if percentage >= 40 else
+            "D" if percentage >= 33 else "F"
+        )
         return {
-            "correct": correct, "wrong": wrong, "blank": blank, "total": total,
-            "raw_marks": raw, "percentage": round(pct, 1), "grade": grade, "details": details,
+            "correct": correct,
+            "wrong": wrong,
+            "blank": blank,
+            "total": total,
+            "raw_marks": raw,
+            "percentage": round(percentage, 1),
+            "grade": grade,
+            "details": details,
         }
 
-    # ─────────────────────────────────────────────────────────
-    # CORE: relative position + local dark search
-    # ─────────────────────────────────────────────────────────
-    def _px(self, frac: float, total: int) -> int:
-        return int(round(frac * total))
-
-    def _sample_mean(self, gray: np.ndarray, cx: int, cy: int, radius: int) -> float:
-        h, w = gray.shape
-        cx = int(np.clip(cx, 0, w - 1))
-        cy = int(np.clip(cy, 0, h - 1))
-        mask = np.zeros(gray.shape, dtype=np.uint8)
-        cv2.circle(mask, (cx, cy), max(radius, 3), 255, -1)
-        return float(cv2.mean(gray, mask=mask)[0])
-
-    def _local_darkest(
-        self, gray: np.ndarray, cx: int, cy: int, search_r: int, sample_r: int
-    ) -> Tuple[float, int, int]:
-        """
-        Search a window around (cx, cy). Return (min_mean, best_x, best_y).
-        This absorbs small shifts when the photo is cropped differently.
-        """
-        h, w = gray.shape
-        x1, x2 = max(0, cx - search_r), min(w, cx + search_r + 1)
-        y1, y2 = max(0, cy - search_r), min(h, cy + search_r + 1)
-
-        best_val, best_x, best_y = 999.0, cx, cy
-        # step 2 px for speed
-        for y in range(y1, y2, 2):
-            for x in range(x1, x2, 2):
-                v = self._sample_mean(gray, x, y, sample_r)
-                if v < best_val:
-                    best_val, best_x, best_y = v, x, y
-        return best_val, best_x, best_y
-
-    def _read_row(
-        self, gray: np.ndarray, xs: List[int], y: int, options: List[str]
-    ) -> Optional[str]:
-        h, w = gray.shape
-        min_side = min(h, w)
-        search_r = max(int(self.config.THRESHOLDS["local_search_frac"] * min_side), 6)
-        sample_r = max(int(self.config.THRESHOLDS["sample_radius_frac"] * min_side), 4)
-        threshold = self.config.THRESHOLDS["darkness_diff_threshold"]
-
-        values = []
-        for x in xs:
-            val, _, _ = self._local_darkest(gray, x, y, search_r, sample_r)
-            values.append(val)
-
-        min_v, max_v = min(values), max(values)
-        if max_v - min_v < threshold:
-            return None
-        return options[values.index(min_v)]
-
-    def _extract_answers(self, gray: np.ndarray, debug: bool = False) -> List[Optional[str]]:
-        h, w = gray.shape
-        options = ["A", "B", "C", "D"]
-        answers: List[Optional[str]] = [None] * self.config.ANSWERS["total_questions"]
-
-        def read_col(col_cfg, q_offset, label):
-            print(f"\n   📝 {label}")
-            xs = [self._px(f, w) for f in col_cfg["option_x_frac"]]
-            for i, yf in enumerate(col_cfg["row_y_frac"]):
-                y = self._px(yf, h)
-                # raw values for log
-                min_side = min(h, w)
-                search_r = max(int(self.config.THRESHOLDS["local_search_frac"] * min_side), 6)
-                sample_r = max(int(self.config.THRESHOLDS["sample_radius_frac"] * min_side), 4)
-                vals = [self._local_darkest(gray, x, y, search_r, sample_r)[0] for x in xs]
-                ans = self._read_row(gray, xs, y, options)
-                answers[q_offset + i - 1] = ans
-                print(f"      Q{q_offset+i:2d}: dark={[f'{v:.0f}' for v in vals]} → {ans or '---'}")
-
-        read_col(self.config.LEFT_COLUMN, 1, "LEFT (Q1-Q10)")
-        read_col(self.config.RIGHT_COLUMN, 11, "RIGHT (Q11-Q20)")
-
-        if debug:
-            self._draw_debug(gray, answers)
-        return answers
-
-    def _extract_student_id(self, gray: np.ndarray) -> str:
-        h, w = gray.shape
-        cfg = self.config.STUDENT_ID
-        min_side = min(h, w)
-        sample_r = max(int(self.config.THRESHOLDS["sample_radius_frac"] * min_side), 3)
-        search_r = max(int(self.config.THRESHOLDS["local_search_frac"] * min_side), 4)
-        threshold = self.config.THRESHOLDS.get("sid_darkness_diff_threshold", 15)
-
-        y0 = self._px(cfg["y0_frac"], h)
-        row_sp = self._px(cfg["row_spacing_frac"], h)
-        cols_x = [self._px(f, w) for f in cfg["col_x_frac"]]
-
-        digits = []
-        print("\n   📖 Student ID (bubbles):")
-        for ci, cx in enumerate(cols_x):
-            vals = []
-            for r in range(cfg["options"]):
-                cy = y0 + r * row_sp
-                v, _, _ = self._local_darkest(gray, cx, cy, search_r, sample_r)
-                vals.append(v)
-            mn, mx = min(vals), max(vals)
-            if mx - mn >= threshold:
-                d = str(vals.index(mn))
-                print(f"      Col {ci+1}: ✅ {d}  (dark={mn:.0f}, diff={mx-mn:.0f})")
-            else:
-                d = "?"
-                print(f"      Col {ci+1}: ❌ blank (diff={mx-mn:.0f})")
-            digits.append(d)
-        return "".join(digits)
-
-    # ─────────────────────────────────────────────────────────
+    # ------------------------------------------------------------------
+    # Image helpers / debug
+    # ------------------------------------------------------------------
     def _enhance(self, image: np.ndarray) -> np.ndarray:
         lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
-        l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
-        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+        lightness, a, b = cv2.split(lab)
+        clip = self.config.PREPROCESS.get("clahe_clip_limit", 2.0)
+        grid = self.config.PREPROCESS.get("clahe_grid", (8, 8))
+        lightness = cv2.createCLAHE(clipLimit=clip, tileGridSize=grid).apply(lightness)
+        return cv2.cvtColor(cv2.merge([lightness, a, b]), cv2.COLOR_LAB2BGR)
 
-    def _draw_debug(self, gray, answers, path="debug_answers.png"):
-        img = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
-        h, w = gray.shape
+    def _draw_debug(
+        self,
+        gray: np.ndarray,
+        answers: List[Optional[str]],
+        student_id: str,
+        sid_alignment: Tuple[int, int] = (0, 0),
+        path: str = "debug_omr.png",
+    ) -> None:
+        image = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
+        h, w = gray.shape[:2]
         options = ["A", "B", "C", "D"]
-        for col_cfg, off in [(self.config.LEFT_COLUMN, 1), (self.config.RIGHT_COLUMN, 11)]:
-            xs = [self._px(f, w) for f in col_cfg["option_x_frac"]]
-            for i, yf in enumerate(col_cfg["row_y_frac"]):
-                y = self._px(yf, h)
-                ans = answers[off + i - 1]
-                r = max(int(0.01 * min(h, w)), 6)
-                for j, x in enumerate(xs):
-                    color = (0, 200, 0) if options[j] == ans else (0, 0, 200)
-                    cv2.circle(img, (x, y), r, color, 2)
-        cv2.imwrite(path, img)
-        print(f"   💾 {path}")
+        answer_radius = max(
+            6,
+            int(round(self.config.THRESHOLDS["sample_radius_frac"] * min(h, w))),
+        )
+
+        for column, offset in (
+            (self.config.LEFT_COLUMN, 1),
+            (self.config.RIGHT_COLUMN, 11),
+        ):
+            xs = [self._px(frac, w) for frac in column["option_x_frac"]]
+            for row_index, y_frac in enumerate(column["row_y_frac"]):
+                y = self._px(y_frac, h)
+                answer = answers[offset + row_index - 1]
+                for option_index, x in enumerate(xs):
+                    selected = answer == options[option_index]
+                    color = (0, 200, 0) if selected else (0, 0, 220)
+                    cv2.circle(image, (x, y), answer_radius, color, 2)
+
+        sid_cfg = self.config.STUDENT_ID
+        sid_dx, sid_dy = sid_alignment
+        sid_xs = [self._px(frac, w) + sid_dx for frac in sid_cfg["col_x_frac"]]
+        sid_ys = [self._px(frac, h) + sid_dy for frac in sid_cfg["row_y_frac"]]
+        for column_index, x in enumerate(sid_xs):
+            selected_digit = student_id[column_index] if column_index < len(student_id) else "?"
+            for digit, y in enumerate(sid_ys):
+                color = (255, 0, 255) if selected_digit == str(digit) else (255, 180, 0)
+                cv2.circle(image, (x, y), 7, color, 1)
+
+        cv2.imwrite(path, image)
+        print(f"   💾 Debug saved: {path}")
